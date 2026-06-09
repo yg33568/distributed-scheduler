@@ -5,6 +5,7 @@ import lombok.Builder;
 import lombok.NoArgsConstructor;
 import lombok.AllArgsConstructor;
 import java.io.Serializable;
+import java.util.List;
 
 @Data
 @Builder
@@ -36,4 +37,7 @@ public class JobContext implements Serializable {
 
     /** 重试次数 */
     private Integer retryCount;
+
+    /** 预热数据key列表 */
+    private List<String> preloadKeys;
 }

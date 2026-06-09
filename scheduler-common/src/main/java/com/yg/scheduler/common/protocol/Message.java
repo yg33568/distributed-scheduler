@@ -65,4 +65,15 @@ public class Message {
         msg.setLength(body.length);
         return msg;
     }
+
+    public static final byte TYPE_CACHE_MIGRATE = 101;
+
+    public static Message cacheMigrate(byte[] body) {
+        Message msg = new Message();
+        msg.setType(TYPE_CACHE_MIGRATE);
+        msg.setStatus(STATUS_SUCCESS);
+        msg.setBody(body);
+        msg.setLength(body.length);
+        return msg;
+    }
 }

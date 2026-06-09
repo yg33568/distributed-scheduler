@@ -1,5 +1,6 @@
 package com.yg.scheduler.core;
 
+import com.yg.scheduler.common.CacheMigrationMessage;
 import com.yg.scheduler.common.protocol.MessageDecoder;
 import com.yg.scheduler.common.protocol.MessageEncoder;
 import com.yg.scheduler.common.util.JsonUtil;
@@ -62,6 +63,34 @@ public class SchedulerServer {
             }
         }
 
+        // 缓存迁移
+        // 获取该worker的热点key
+        System.out.println("[DEBUG] removeWorker called for: " + workerId);
+        System.out.println("[DEBUG] workers before removal: " + workers.keySet());
+
+        List<String> hotKeys = CacheMigrationService.getHotKeys(workerId);
+
+        System.out.println("[DEBUG] hotKeys for " + workerId + ": " + (hotKeys == null ? "null" : hotKeys.size()));
+
+        if (hotKeys != null && !hotKeys.isEmpty() && !workers.isEmpty()) {
+            String targetWorkerId = workers.keySet().iterator().next();
+
+            System.out.println("[DEBUG] targetWorkerId: " + targetWorkerId);
+
+            ChannelHandlerContext targetCtx = workers.get(targetWorkerId);
+            if (targetCtx != null) {
+                CacheMigrationMessage msg = new CacheMigrationMessage(hotKeys);
+                String json = JsonUtil.toJson(msg);
+                targetCtx.writeAndFlush(Message.cacheMigrate(json.getBytes()));
+                System.out.println("[Migration] Migrated " + hotKeys.size() + " keys from " + workerId + " to " + targetWorkerId);
+            }
+        }
+        else {
+            System.out.println("[DEBUG] Migration skipped: hotKeys=" + hotKeys + ", workers.size=" + workers.size());
+        }
+        CacheMigrationService.removeHotKeys(workerId);
+
+        // 移除节点
         workers.remove(workerId);
         rebuildRouter();
         System.out.println("Worker removed: " + workerId + ", remaining workers: " + workers.size());
@@ -111,7 +140,11 @@ public class SchedulerServer {
                 }
                 if (ctx != null && ctx.channel().isActive()) {
                     long jobId = System.currentTimeMillis() + i;
-                    String taskId = jobId + "_" + i + "_0";  // 格式：jobId_shardingItem_retryCount
+                    String taskId = jobId + "_" + i + "_0";
+                    List<String> preloadKeys=new ArrayList<>();
+                    for (int j = 0; j < 10; j++) {
+                        preloadKeys.add("user:" + (i * 100 + j));
+                    }
 
                     JobContext job = JobContext.builder()
                             .jobId(jobId)
@@ -122,14 +155,22 @@ public class SchedulerServer {
                             .shardingItem(i)
                             .timeout(30)
                             .retryCount(0)
+                            .preloadKeys(preloadKeys)
                             .build();
+
+                    // 生成热点key列表（用于缓存迁移）
+                    List<String> hotKeys = new ArrayList<>();
+                    for (int j = 0; j < 10; j++) {
+                        hotKeys.add("user:" + (i * 100 + j));
+                    }
+                    CacheMigrationService.registerHotKeys(targetWorkerId, hotKeys);
 
                     String json = JsonUtil.toJson(job);
                     JobDao.getInstance().save(job, targetWorkerId);
                     ctx.writeAndFlush(Message.request(json.getBytes()));
                     System.out.println("[Sharding] Shard " + i + " -> " + targetWorkerId);
 
-                    // ========== 超时代码放在这里 ==========
+                    // 超时代码
                     pendingJobs.put(job.getJobId(), job);
                     runningTasks.computeIfAbsent(targetWorkerId, k -> new ArrayList<>()).add(job);
 
@@ -145,7 +186,6 @@ public class SchedulerServer {
                         }
                     }, job.getTimeout(), TimeUnit.SECONDS);
                     timeoutFutures.put(job.getJobId(), timeoutFuture);
-                    // ===================================
                 }
             }
             System.out.println("[Sharding] End");
