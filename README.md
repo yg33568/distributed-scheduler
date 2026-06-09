@@ -10,7 +10,7 @@
 
 | 分类 | 技术 | 版本 |
 | --- | --- | --- |
-| 语言 | Java | 11 |
+| 语言 | Java | 17 |
 | 网络通信 | Netty | 4.1.100.Final |
 | 本地缓存 | Caffeine | 3.1.8 |
 | 分布式缓存 | Redis / Jedis | 4.4.3 |
@@ -104,7 +104,7 @@ distributed-scheduler/
 ## 快速开始
 
 ### 环境要求
-- JDK 11+
+- JDK 17+
 - MySQL 8.0+
 - Redis 5.0+
 
@@ -130,7 +130,7 @@ CREATE TABLE schedule_job (
     update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 ```
-2. 修改配置
+### 2. 修改配置
 修改 scheduler-core/JobDao.java 中的数据库连接：
 ```
 config.setJdbcUrl("jdbc:mysql://localhost:3306/scheduler?useSSL=false");
@@ -141,19 +141,19 @@ config.setPassword("your_password");
 ```
 this.jedisPool = new JedisPool(poolConfig, "localhost", 6379);
 ```
-3. 编译打包
+### 3. 编译打包
 ```
 mvn clean package
 ```
-4. 启动调度中心
+### 4. 启动调度中心
 ```
 java -cp scheduler-core/target/scheduler-core-1.0-SNAPSHOT.jar com.yg.scheduler.core.SchedulerServer
 ```
-5. 启动执行器（可启动多个）
+### 5. 启动执行器（可启动多个）
 ```
 java -cp scheduler-worker/target/scheduler-worker-1.0-SNAPSHOT.jar com.yg.scheduler.worker.SchedulerClient
 ```
-6. 查看管理接口
+### 6. 查看管理接口
 浏览器访问：
 ```
 http://localhost:8081/workers - 查看在线执行器
