@@ -30,7 +30,7 @@ public class ServerHandler extends SimpleChannelInboundHandler<Message> {
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         log.info("Executor disconnected: {}", ctx.channel().remoteAddress());
         if (workerId != null) {
-            SchedulerServer.removeWorker(workerId);// 从注册表移除
+            SchedulerServer.removeWorker(workerId, ctx);// 从注册表移除
         }
     }
 
@@ -83,7 +83,7 @@ public class ServerHandler extends SimpleChannelInboundHandler<Message> {
         if (evt instanceof IdleStateEvent) {
             log.warn("Heartbeat timeout, closing: {}", ctx.channel().remoteAddress());
             if (workerId != null) {
-                SchedulerServer.removeWorker(workerId);// 移除节点
+                SchedulerServer.removeWorker(workerId, ctx);// 移除节点
             }
 
             ctx.close();
@@ -95,7 +95,7 @@ public class ServerHandler extends SimpleChannelInboundHandler<Message> {
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
         log.error("Exception on channel {}: {}", ctx.channel().remoteAddress(), cause.toString());
         if (workerId != null) {
-            SchedulerServer.removeWorker(workerId);
+            SchedulerServer.removeWorker(workerId, ctx);
         }
         ctx.close();
     }

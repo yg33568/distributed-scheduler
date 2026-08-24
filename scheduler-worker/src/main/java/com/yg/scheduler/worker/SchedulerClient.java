@@ -24,13 +24,13 @@ public class SchedulerClient {
 
     private final String host;
     private final int port;
-    private final String workerId;
+    private final WorkerRuntime runtime;
     private Channel channel;
 
-    public SchedulerClient(String host, int port, String workerId) {
+    public SchedulerClient(String host, int port, WorkerRuntime runtime) {
         this.host = host;
         this.port = port;
-        this.workerId = workerId;
+        this.runtime = runtime;
     }
 
     //连接调度服务器
@@ -47,7 +47,7 @@ public class SchedulerClient {
                             ChannelPipeline pipeline = ch.pipeline();
                             pipeline.addLast(new MessageDecoder());
                             pipeline.addLast(new MessageEncoder());
-                            pipeline.addLast(new ClientHandler());
+                            pipeline.addLast(new ClientHandler(runtime));
                         }
                     });
 
@@ -57,10 +57,10 @@ public class SchedulerClient {
 
             // 发送注册消息
             String advertiseHost = AppConfig.get("worker.advertise-host", host);
-            WorkerInfo info = new WorkerInfo(workerId, advertiseHost, port, true, System.currentTimeMillis());
+            WorkerInfo info = new WorkerInfo(runtime.getWorkerId(), advertiseHost, port, true, System.currentTimeMillis());
             String json = JsonUtil.toJson(info);
             channel.writeAndFlush(Message.register(json.getBytes()));
-            log.info("Registered with workerId: {}", workerId);
+            log.info("Registered with workerId: {}", runtime.getWorkerId());
 
             startHeartbeat();
 
@@ -94,6 +94,11 @@ public class SchedulerClient {
         if (workerId == null || workerId.isEmpty()) {
             workerId = "worker-" + System.currentTimeMillis();
         }
-        new SchedulerClient(host, port, workerId).connect();
+
+        WorkerRuntime runtime = new WorkerRuntime(workerId);
+        // 进程退出时释放 Redis 连接池等资源（不再在每次断线时关闭缓存）
+        Runtime.getRuntime().addShutdownHook(new Thread(runtime::close, "worker-shutdown"));
+
+        new SchedulerClient(host, port, runtime).connect();
     }
 }

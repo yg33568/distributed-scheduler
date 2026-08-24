@@ -20,10 +20,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.*;
+import java.util.concurrent.ThreadLocalRandom;
 
 public class SchedulerServer {
 
@@ -40,7 +42,11 @@ public class SchedulerServer {
     private static final Map<String, List<JobContext>> runningTasks = new ConcurrentHashMap<>();
     // 失败重试队列
     private static final Queue<JobContext> retryQueue = new ConcurrentLinkedQueue<>();
-    private final ScheduledExecutorService timeoutExecutor = Executors.newSingleThreadScheduledExecutor();
+    // 超时定时器线程池（Phase 3 集群化时统一转实例字段）
+    private static final ScheduledExecutorService timeoutExecutor = Executors.newSingleThreadScheduledExecutor();
+
+    // 实例随机盐：jobId = (now<<16) | (salt+i)，避免同毫秒生成冲突（脑裂双实例/多次调度）
+    private static final int INSTANCE_SALT = ThreadLocalRandom.current().nextInt(0xFFFF);
 
     public SchedulerServer(int port) {
         this.port = port;
@@ -60,7 +66,13 @@ public class SchedulerServer {
      * ② 缓存迁移	把热点Key发给其他执行器	新节点的缓存不能是冷的
      * ③ 移除节点	从 workers 移除，重建Hash环	后续任务不再发给它
      */
-    public static void removeWorker(String workerId) {
+    public static void removeWorker(String workerId, ChannelHandlerContext ctx) {
+        // 防误删：若该 workerId 当前注册的 channel 不是发起移除的这个连接，说明是陈旧连接，忽略
+        if (workers.get(workerId) != ctx) {
+            log.info("Stale removal ignored for worker {}, current channel differs", workerId);
+            return;
+        }
+
         // 任务转移：将该 worker 未完成的任务放回重试队列
         List<JobContext> orphanTasks = runningTasks.remove(workerId);
         if (orphanTasks != null && !orphanTasks.isEmpty()) {
@@ -76,26 +88,32 @@ public class SchedulerServer {
             }
         }
 
-        // 缓存迁移
-        // 获取该worker的热点key
+        // 缓存迁移：先把节点从哈希环移除并重建环，再对每个热点key用一致性哈希求"后继者"，
+        // 按后继者聚合后发迁移指令，保证迁移目标是哈希环上的正确下一个节点（而非任意节点）
+        workers.remove(workerId);
+        rebuildRouter();
         List<String> hotKeys = CacheMigrationService.getHotKeys(workerId);
-
-        if (hotKeys != null && !hotKeys.isEmpty() && !workers.isEmpty()) {
-            String targetWorkerId = workers.keySet().iterator().next();
-
-            ChannelHandlerContext targetCtx = workers.get(targetWorkerId);
-            if (targetCtx != null) {
-                CacheMigrationMessage msg = new CacheMigrationMessage(hotKeys);
-                String json = JsonUtil.toJson(msg);
-                targetCtx.writeAndFlush(Message.cacheMigrate(json.getBytes()));
-                log.info("[Migration] Migrated {} keys from {} to {}", hotKeys.size(), workerId, targetWorkerId);
+        if (hotKeys != null && !hotKeys.isEmpty() && router != null) {
+            // 聚合：目标 worker -> 需要迁移的 key 列表
+            Map<String, List<String>> migrateTargets = new HashMap<>();
+            for (String key : hotKeys) {
+                String targetWorkerId = router.route(key);
+                if (targetWorkerId != null) {
+                    migrateTargets.computeIfAbsent(targetWorkerId, k -> new ArrayList<>()).add(key);
+                }
+            }
+            for (Map.Entry<String, List<String>> e : migrateTargets.entrySet()) {
+                ChannelHandlerContext targetCtx = workers.get(e.getKey());
+                if (targetCtx != null) {
+                    CacheMigrationMessage msg = new CacheMigrationMessage(e.getValue());
+                    String json = JsonUtil.toJson(msg);
+                    targetCtx.writeAndFlush(Message.cacheMigrate(json.getBytes()));
+                    log.info("[Migration] Migrated {} keys from {} to {}", e.getValue().size(), workerId, e.getKey());
+                }
             }
         }
         CacheMigrationService.removeHotKeys(workerId);
 
-        // 移除节点
-        workers.remove(workerId);
-        rebuildRouter();
         log.info("Worker removed: {}, remaining workers: {}", workerId, workers.size());
     }
 
@@ -113,6 +131,52 @@ public class SchedulerServer {
         return workers;
     }
 
+    /**
+     * 统一任务派发入口：分片调度、重试调度、故障恢复三处共用，保证行为一致。
+     * 1. 一致性哈希路由 targetWorkerId = router.route(taskId)
+     * 2. 目标在线 → 存 DB、发送、登记 pendingJobs/runningTasks、设超时定时器
+     * 3. 目标不在线 → 推回重试队列
+     *
+     * @return true 表示成功派发给某个 worker
+     */
+    private static boolean dispatchJob(JobContext job) {
+        if (workers.isEmpty() || router == null) {
+            retryQueue.offer(job);
+            return false;
+        }
+        String targetWorkerId = router.route(job.getTaskId());
+        ChannelHandlerContext ctx = workers.get(targetWorkerId);
+        if (ctx == null || !ctx.channel().isActive()) {
+            retryQueue.offer(job);
+            log.info("[Dispatch] No active target for job {}, queued for retry", job.getJobId());
+            return false;
+        }
+
+        String json = JsonUtil.toJson(job);
+        JobDao.getInstance().save(job, targetWorkerId);
+        ctx.writeAndFlush(Message.request(json.getBytes()));
+        log.info("[Dispatch] Job {} (shard={}) -> {}", job.getJobId(), job.getShardingItem(), targetWorkerId);
+
+        // 登记内存状态
+        pendingJobs.put(job.getJobId(), job);
+        runningTasks.computeIfAbsent(targetWorkerId, k -> new ArrayList<>()).add(job);
+
+        // 设置超时定时器
+        int timeout = job.getTimeout() == null ? 30 : job.getTimeout();
+        ScheduledFuture<?> timeoutFuture = timeoutExecutor.schedule(() -> {
+            JobContext timedOut = pendingJobs.remove(job.getJobId());
+            if (timedOut != null) {
+                log.warn("Job timeout: {}", job.getJobId());
+                JobDao.getInstance().updateStatus(job.getJobId(), "TIMEOUT", "Execution timeout");
+                if (timedOut.getRetryCount() == null || timedOut.getRetryCount() < 3) {
+                    timedOut.setRetryCount(timedOut.getRetryCount() == null ? 1 : timedOut.getRetryCount() + 1);
+                    retryQueue.offer(timedOut);
+                }
+            }
+        }, timeout, TimeUnit.SECONDS);
+        timeoutFutures.put(job.getJobId(), timeoutFuture);
+        return true;
+    }
 
     //分片调度器
     //每 30 秒执行一次，生成 10 个分片任务，通过一致性Hash发给对应的执行器
@@ -141,64 +205,36 @@ public class SchedulerServer {
             log.info("[Sharding] Start, total shards: {}", shardingTotal);
 
             for (int i = 0; i < shardingTotal; i++) {
-                String shardKey = "shard-" + i;
-                String targetWorkerId = router.route(shardKey);
+                long jobId = (System.currentTimeMillis() << 16) | ((INSTANCE_SALT + i) & 0xFFFF);
+                String taskId = jobId + "_" + i + "_0";
 
-                // 直接从 workers 中获取，打印 null 时的详细信息
-                ChannelHandlerContext ctx = workers.get(targetWorkerId);
-                if (ctx == null) {
-                    log.warn("[Sharding] workers.get returned null for key: [{}]", targetWorkerId);
-                    continue;
+                List<String> preloadKeys = new ArrayList<>();
+                List<String> hotKeys = new ArrayList<>();
+                for (int j = 0; j < 10; j++) {
+                    String key = "user:" + (i * 100 + j);
+                    preloadKeys.add(key);
+                    hotKeys.add(key);
                 }
-                if (ctx != null && ctx.channel().isActive()) {
-                    long jobId = System.currentTimeMillis() + i;
-                    String taskId = jobId + "_" + i + "_0";
-                    List<String> preloadKeys = new ArrayList<>();
-                    for (int j = 0; j < 10; j++) {
-                        preloadKeys.add("user:" + (i * 100 + j));
-                    }
 
-                    JobContext job = JobContext.builder()
-                            .jobId(jobId)
-                            .taskId(taskId)
-                            .jobName("ShardTask")
-                            .params("{\"shardIndex\":" + i + ",\"total\":" + shardingTotal + "}")
-                            .shardingTotal(shardingTotal)
-                            .shardingItem(i)
-                            .timeout(30)
-                            .retryCount(0)
-                            .preloadKeys(preloadKeys)
-                            .build();
+                JobContext job = JobContext.builder()
+                        .jobId(jobId)
+                        .taskId(taskId)
+                        .jobName("ShardTask")
+                        .params("{\"shardIndex\":" + i + ",\"total\":" + shardingTotal + "}")
+                        .shardingTotal(shardingTotal)
+                        .shardingItem(i)
+                        .timeout(30)
+                        .retryCount(0)
+                        .preloadKeys(preloadKeys)
+                        .build();
 
-                    // 生成热点key列表（用于缓存迁移）
-                    List<String> hotKeys = new ArrayList<>();
-                    for (int j = 0; j < 10; j++) {
-                        hotKeys.add("user:" + (i * 100 + j));
-                    }
+                // 按 taskId 路由（与 dispatchJob 内部一致），把热点key登记到真正收任务的 worker 名下
+                String targetWorkerId = router.route(job.getTaskId());
+                if (targetWorkerId != null) {
                     CacheMigrationService.registerHotKeys(targetWorkerId, hotKeys);
-
-                    String json = JsonUtil.toJson(job);
-                    JobDao.getInstance().save(job, targetWorkerId);
-                    ctx.writeAndFlush(Message.request(json.getBytes()));
-                    log.info("[Sharding] Shard {} -> {}", i, targetWorkerId);
-
-                    // 超时代码
-                    pendingJobs.put(job.getJobId(), job);
-                    runningTasks.computeIfAbsent(targetWorkerId, k -> new ArrayList<>()).add(job);
-
-                    ScheduledFuture<?> timeoutFuture = timeoutExecutor.schedule(() -> {
-                        JobContext timedOutJob = pendingJobs.remove(job.getJobId());
-                        if (timedOutJob != null) {
-                            log.warn("Job timeout: {}", job.getJobId());
-                            JobDao.getInstance().updateStatus(job.getJobId(), "TIMEOUT", "Execution timeout");
-                            if (timedOutJob.getRetryCount() == null || timedOutJob.getRetryCount() < 3) {
-                                timedOutJob.setRetryCount(timedOutJob.getRetryCount() == null ? 1 : timedOutJob.getRetryCount() + 1);
-                                retryQueue.offer(timedOutJob);
-                            }
-                        }
-                    }, job.getTimeout(), TimeUnit.SECONDS);
-                    timeoutFutures.put(job.getJobId(), timeoutFuture);
                 }
+
+                dispatchJob(job);
             }
             log.info("[Sharding] End");
         }, 5, 30, TimeUnit.SECONDS);
@@ -210,21 +246,14 @@ public class SchedulerServer {
         retryScheduler.scheduleAtFixedRate(() -> {
             if (retryQueue.isEmpty() || workers.isEmpty()) return;
 
-            List<String> nodeIds = new ArrayList<>(workers.keySet());
-            router = new ConsistentHashRouter(nodeIds, 150);
-
             JobContext job = retryQueue.poll();
             if (job == null) return;
 
-            String targetWorkerId = router.route(job.getTaskId());
-            ChannelHandlerContext ctx = workers.get(targetWorkerId);
-
-            if (ctx != null && ctx.channel().isActive()) {
-                String json = JsonUtil.toJson(job);
-                ctx.writeAndFlush(Message.request(json.getBytes()));
-                log.info("[Retry] Re-sending job {} to {}, retryCount={}", job.getJobId(), targetWorkerId, job.getRetryCount());
+            // 复用统一派发，重试任务也会重新登记超时定时器（修掉旧版"重试不跟踪"的bug）
+            if (dispatchJob(job)) {
+                log.info("[Retry] Re-sent job {}, retryCount={}", job.getJobId(), job.getRetryCount());
             } else {
-                retryQueue.offer(job);
+                log.info("[Retry] Re-dispatch failed, job {} requeued, retryCount={}", job.getJobId(), job.getRetryCount());
             }
         }, 5, 10, TimeUnit.SECONDS);
     }

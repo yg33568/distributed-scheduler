@@ -13,16 +13,18 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 
 //负责接收调度中心发来的所有消息，并执行对应的操作。
 public class ClientHandler extends SimpleChannelInboundHandler<Message> {
 
     private static final Logger log = LoggerFactory.getLogger(ClientHandler.class);
 
-    //已执行任务集合（用于幂等性判断）
-    private final Set<String> executedTasks = ConcurrentHashMap.newKeySet();
+    // worker 进程共享运行时（幂等状态、缓存跨重连不丢）
+    private final WorkerRuntime runtime;
+
+    public ClientHandler(WorkerRuntime runtime) {
+        this.runtime = runtime;
+    }
 
     // 连接建立时
     @Override
@@ -52,27 +54,37 @@ public class ClientHandler extends SimpleChannelInboundHandler<Message> {
                 // 1. 解析 JSON → JobContext 对象
                 JobContext job = JsonUtil.fromJson(json, JobContext.class);
 
-                // 2.幂等检查：如果这个 taskId 已经执行过，直接返回成功
-                if (executedTasks.contains(job.getTaskId())) {
+                // 2. 幂等检查一：已完成 → 直接回成功
+                if (runtime.getExecutedTasks().contains(job.getTaskId())) {
                     log.info("Task already executed: {}", job.getTaskId());
-                    ExecutionResult duplicateResult = ExecutionResult.success(job.getJobId(), job.getTaskId(), "Already executed");
-                    ctx.writeAndFlush(Message.response(JsonUtil.toJson(duplicateResult).getBytes()));
+                    ctx.writeAndFlush(Message.response(
+                            JsonUtil.toJson(ExecutionResult.success(job.getJobId(), job.getTaskId(), "Already executed")).getBytes()));
+                    return;
+                }
+                // 3. 幂等检查二：正在执行（leader 故障重派到本节点）→ 回成功，避免重复执行/重派死循环
+                if (!runtime.getExecutingTasks().add(job.getTaskId())) {
+                    log.info("Task already executing: {}", job.getTaskId());
+                    ctx.writeAndFlush(Message.response(
+                            JsonUtil.toJson(ExecutionResult.success(job.getJobId(), job.getTaskId(), "Already executing")).getBytes()));
                     return;
                 }
 
-                // 3. 执行任务
-                ExecutionResult result = execute(job);
-
-                // 4.执行成功，记录已执行
-                if (result.getSuccess()) {
-                    executedTasks.add(job.getTaskId());
+                // 4. 执行任务
+                ExecutionResult result;
+                try {
+                    result = execute(job);
+                } finally {
+                    runtime.getExecutingTasks().remove(job.getTaskId());
                 }
 
-                String resultJson = JsonUtil.toJson(result);
+                // 5. 执行成功，记录已执行（幂等）
+                if (result.getSuccess()) {
+                    runtime.getExecutedTasks().add(job.getTaskId());
+                }
 
-                // 5. 返回结果给调度中心
-                ctx.writeAndFlush(Message.response(resultJson.getBytes()));
-                log.debug("Result sent: {}", resultJson);
+                // 6. 返回结果给调度中心
+                ctx.writeAndFlush(Message.response(JsonUtil.toJson(result).getBytes()));
+                log.debug("Result sent: {}", JsonUtil.toJson(result));
                 break;
 
             // 缓存迁移消息
@@ -83,11 +95,11 @@ public class ClientHandler extends SimpleChannelInboundHandler<Message> {
                 log.info("[Migration] Received cache migration request, keys count: {}", migrateMsg.getHotKeys().size());
 
                 // 这些 key 在原 worker 上是热点，确实存在 → 先预热布隆过滤器，避免被门禁拦掉
-                cacheService.prewarm(migrateMsg.getHotKeys());
+                runtime.getCacheService().prewarm(migrateMsg.getHotKeys());
 
                 // 逐个预加载到本地缓存
                 for (String key : migrateMsg.getHotKeys()) {
-                    cacheService.get(key, () -> {
+                    runtime.getCacheService().get(key, () -> {
                         log.info("[Migration] Loading migrated key from DB: {}", key);
                         return "{\"migrated\":true}";
                     });
@@ -99,8 +111,6 @@ public class ClientHandler extends SimpleChannelInboundHandler<Message> {
                 log.warn("Unknown message type: {}", msg.getType());
         }
     }
-
-    private final CacheService cacheService = new CacheService();
 
     //execute — 真正执行任务的地方
     // 数据模型：分片 i 负责处理 user:{i*100} .. user:{i*100+9} 这 10 个 key，
@@ -116,11 +126,11 @@ public class ClientHandler extends SimpleChannelInboundHandler<Message> {
 
         try {
             // ① 预热布隆过滤器：这些 key 是数据集中确实存在的（与调度中心的 preloadKeys 一致）
-            cacheService.prewarm(keys);
+            runtime.getCacheService().prewarm(keys);
 
             // ② 分片感知预热：逐个读取，加载到 L1/L2 缓存
             for (String key : keys) {
-                cacheService.get(key, () -> {
+                runtime.getCacheService().get(key, () -> {
                     log.debug("[DB] Querying database for: {}", key);
                     String uid = key.substring("user:".length());
                     return "{\"name\":\"User" + uid + "\",\"level\":1}";
@@ -128,7 +138,7 @@ public class ClientHandler extends SimpleChannelInboundHandler<Message> {
             }
 
             // ③ 业务读取（命中预热的 L1 缓存）
-            String userData = cacheService.get("user:" + (base + 3), () -> "{\"name\":\"unknown\"}");
+            String userData = runtime.getCacheService().get("user:" + (base + 3), () -> "{\"name\":\"unknown\"}");
             log.info("Executing job: {}, shard: {}", job.getJobName(), job.getShardingItem());
             log.info("User data from cache: {}", userData);
 
@@ -137,13 +147,6 @@ public class ClientHandler extends SimpleChannelInboundHandler<Message> {
         } catch (Exception e) {
             return ExecutionResult.failure(job.getJobId(), job.getTaskId(), "Execution failed: " + e.getMessage());
         }
-    }
-
-    // 在连接断开或关闭时清理资源
-    @Override
-    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-        cacheService.close(); // 释放 Redis 连接池等资源
-        super.channelInactive(ctx);
     }
 
     // 发生异常时
