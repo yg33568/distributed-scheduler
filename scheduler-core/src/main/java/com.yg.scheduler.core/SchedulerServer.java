@@ -1,6 +1,7 @@
 package com.yg.scheduler.core;
 
 import com.yg.scheduler.common.CacheMigrationMessage;
+import com.yg.scheduler.common.config.AppConfig;
 import com.yg.scheduler.common.protocol.MessageDecoder;
 import com.yg.scheduler.common.protocol.MessageEncoder;
 import com.yg.scheduler.common.util.JsonUtil;
@@ -15,6 +16,8 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.timeout.IdleStateHandler;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -23,6 +26,8 @@ import java.util.Queue;
 import java.util.concurrent.*;
 
 public class SchedulerServer {
+
+    private static final Logger log = LoggerFactory.getLogger(SchedulerServer.class);
 
     private final int port;
     private static final Map<String, ChannelHandlerContext> workers = new ConcurrentHashMap<>();
@@ -45,7 +50,7 @@ public class SchedulerServer {
     public static void registerWorker(String workerId, ChannelHandlerContext ctx) {
         workers.put(workerId, ctx);
         rebuildRouter();
-        System.out.println("Worker registered: " + workerId + ", total workers: " + workers.size());
+        log.info("Worker registered: {}, total workers: {}", workerId, workers.size());
     }
 
     /**
@@ -67,41 +72,31 @@ public class SchedulerServer {
                 }
                 JobDao.getInstance().updateStatus(job.getJobId(), "PENDING", "Worker removed, pending retry");
                 retryQueue.offer(job);
-                System.out.println("Re-queued task " + job.getJobId() + " from failed worker " + workerId);
+                log.info("Re-queued task {} from failed worker {}", job.getJobId(), workerId);
             }
         }
 
         // 缓存迁移
         // 获取该worker的热点key
-        System.out.println("[DEBUG] removeWorker called for: " + workerId);
-        System.out.println("[DEBUG] workers before removal: " + workers.keySet());
-
         List<String> hotKeys = CacheMigrationService.getHotKeys(workerId);
-
-        System.out.println("[DEBUG] hotKeys for " + workerId + ": " + (hotKeys == null ? "null" : hotKeys.size()));
 
         if (hotKeys != null && !hotKeys.isEmpty() && !workers.isEmpty()) {
             String targetWorkerId = workers.keySet().iterator().next();
-
-            System.out.println("[DEBUG] targetWorkerId: " + targetWorkerId);
 
             ChannelHandlerContext targetCtx = workers.get(targetWorkerId);
             if (targetCtx != null) {
                 CacheMigrationMessage msg = new CacheMigrationMessage(hotKeys);
                 String json = JsonUtil.toJson(msg);
                 targetCtx.writeAndFlush(Message.cacheMigrate(json.getBytes()));
-                System.out.println("[Migration] Migrated " + hotKeys.size() + " keys from " + workerId + " to " + targetWorkerId);
+                log.info("[Migration] Migrated {} keys from {} to {}", hotKeys.size(), workerId, targetWorkerId);
             }
-        }
-        else {
-            System.out.println("[DEBUG] Migration skipped: hotKeys=" + hotKeys + ", workers.size=" + workers.size());
         }
         CacheMigrationService.removeHotKeys(workerId);
 
         // 移除节点
         workers.remove(workerId);
         rebuildRouter();
-        System.out.println("Worker removed: " + workerId + ", remaining workers: " + workers.size());
+        log.info("Worker removed: {}, remaining workers: {}", workerId, workers.size());
     }
 
     private static void rebuildRouter() {
@@ -111,7 +106,7 @@ public class SchedulerServer {
         }
         List<String> nodeIds = new ArrayList<>(workers.keySet());
         router = new ConsistentHashRouter(nodeIds, 150);
-        System.out.println("Router rebuilt with " + nodeIds.size() + " nodes");
+        log.info("Router rebuilt with {} nodes", nodeIds.size());
     }
 
     public static Map<String, ChannelHandlerContext> getWorkersMap() {
@@ -135,7 +130,7 @@ public class SchedulerServer {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         scheduler.scheduleAtFixedRate(() -> {
             if (workers.isEmpty() || router == null) {
-                System.out.println("[Sharding] No workers, skip");
+                log.info("[Sharding] No workers, skip");
                 return;
             }
 
@@ -143,7 +138,7 @@ public class SchedulerServer {
             router = new ConsistentHashRouter(nodeIds, 150);
 
             int shardingTotal = 10;
-            System.out.println("[Sharding] Start, total shards: " + shardingTotal);
+            log.info("[Sharding] Start, total shards: {}", shardingTotal);
 
             for (int i = 0; i < shardingTotal; i++) {
                 String shardKey = "shard-" + i;
@@ -152,17 +147,13 @@ public class SchedulerServer {
                 // 直接从 workers 中获取，打印 null 时的详细信息
                 ChannelHandlerContext ctx = workers.get(targetWorkerId);
                 if (ctx == null) {
-                    System.out.println("[DEBUG] workers.get returned null for key: [" + targetWorkerId + "]");
-                    // 尝试遍历 keys 找出真正匹配的
-                    for (String key : workers.keySet()) {
-                        System.out.println("[DEBUG] comparing with key: [" + key + "], equals=" + key.equals(targetWorkerId));
-                    }
+                    log.warn("[Sharding] workers.get returned null for key: [{}]", targetWorkerId);
                     continue;
                 }
                 if (ctx != null && ctx.channel().isActive()) {
                     long jobId = System.currentTimeMillis() + i;
                     String taskId = jobId + "_" + i + "_0";
-                    List<String> preloadKeys=new ArrayList<>();
+                    List<String> preloadKeys = new ArrayList<>();
                     for (int j = 0; j < 10; j++) {
                         preloadKeys.add("user:" + (i * 100 + j));
                     }
@@ -189,7 +180,7 @@ public class SchedulerServer {
                     String json = JsonUtil.toJson(job);
                     JobDao.getInstance().save(job, targetWorkerId);
                     ctx.writeAndFlush(Message.request(json.getBytes()));
-                    System.out.println("[Sharding] Shard " + i + " -> " + targetWorkerId);
+                    log.info("[Sharding] Shard {} -> {}", i, targetWorkerId);
 
                     // 超时代码
                     pendingJobs.put(job.getJobId(), job);
@@ -198,7 +189,7 @@ public class SchedulerServer {
                     ScheduledFuture<?> timeoutFuture = timeoutExecutor.schedule(() -> {
                         JobContext timedOutJob = pendingJobs.remove(job.getJobId());
                         if (timedOutJob != null) {
-                            System.out.println("Job timeout: " + job.getJobId());
+                            log.warn("Job timeout: {}", job.getJobId());
                             JobDao.getInstance().updateStatus(job.getJobId(), "TIMEOUT", "Execution timeout");
                             if (timedOutJob.getRetryCount() == null || timedOutJob.getRetryCount() < 3) {
                                 timedOutJob.setRetryCount(timedOutJob.getRetryCount() == null ? 1 : timedOutJob.getRetryCount() + 1);
@@ -209,7 +200,7 @@ public class SchedulerServer {
                     timeoutFutures.put(job.getJobId(), timeoutFuture);
                 }
             }
-            System.out.println("[Sharding] End");
+            log.info("[Sharding] End");
         }, 5, 30, TimeUnit.SECONDS);
     }
 
@@ -231,7 +222,7 @@ public class SchedulerServer {
             if (ctx != null && ctx.channel().isActive()) {
                 String json = JsonUtil.toJson(job);
                 ctx.writeAndFlush(Message.request(json.getBytes()));
-                System.out.println("[Retry] Re-sending job " + job.getJobId() + " to " + targetWorkerId + ", retryCount=" + job.getRetryCount());
+                log.info("[Retry] Re-sending job {} to {}, retryCount={}", job.getJobId(), targetWorkerId, job.getRetryCount());
             } else {
                 retryQueue.offer(job);
             }
@@ -257,12 +248,12 @@ public class SchedulerServer {
                         }
                     });
 
-            System.out.println("SchedulerServer started on port " + port);
+            log.info("SchedulerServer started on port {}", port);
             new Thread(() -> {
                 try {
-                    new AdminServer(8081).start();
+                    new AdminServer(AppConfig.getInt("scheduler.admin-port", 8081)).start();
                 } catch (Exception e) {
-                    e.printStackTrace();
+                    log.error("AdminServer failed", e);
                 }
             }).start();
 
@@ -295,12 +286,12 @@ public class SchedulerServer {
             if (!success && (job.getRetryCount() == null || job.getRetryCount() < 3)) {
                 job.setRetryCount(job.getRetryCount() == null ? 1 : job.getRetryCount() + 1);
                 retryQueue.offer(job);
-                System.out.println("Added job " + jobId + " to retry queue, retryCount=" + job.getRetryCount());
+                log.info("Added job {} to retry queue, retryCount={}", jobId, job.getRetryCount());
             }
         }
     }
 
     public static void main(String[] args) throws Exception {
-        new SchedulerServer(8080).start();
+        new SchedulerServer(AppConfig.getInt("scheduler.port", 8080)).start();
     }
 }

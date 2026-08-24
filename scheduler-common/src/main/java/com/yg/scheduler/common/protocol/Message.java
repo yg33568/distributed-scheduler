@@ -86,4 +86,14 @@ public class Message {
         msg.setLength(body.length);
         return msg;
     }
+
+    //静态工厂方法，创建一个"注册确认"消息（无消息体）
+    public static Message registerAck() {
+        Message msg = new Message();
+        msg.setType(TYPE_REGISTER_ACK);
+        msg.setStatus(STATUS_SUCCESS);
+        msg.setBody(new byte[0]);
+        msg.setLength(0);
+        return msg;
+    }
 }

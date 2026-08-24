@@ -8,23 +8,27 @@ import com.yg.scheduler.common.WorkerInfo;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.timeout.IdleStateEvent;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 // ServerHandler 是调度中心（Scheduler）的业务处理器
 // 负责处理所有来自执行器（Worker）的消息
 public class ServerHandler extends SimpleChannelInboundHandler<Message> {
+
+    private static final Logger log = LoggerFactory.getLogger(ServerHandler.class);
 
     private String workerId;
 
     //执行器连接时
     @Override
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
-        System.out.println("Executor connected: " + ctx.channel().remoteAddress());
+        log.info("Executor connected: {}", ctx.channel().remoteAddress());
     }
 
     //执行器断开时
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-        System.out.println("Executor disconnected: " + ctx.channel().remoteAddress());
+        log.info("Executor disconnected: {}", ctx.channel().remoteAddress());
         if (workerId != null) {
             SchedulerServer.removeWorker(workerId);// 从注册表移除
         }
@@ -35,7 +39,6 @@ public class ServerHandler extends SimpleChannelInboundHandler<Message> {
     protected void channelRead0(ChannelHandlerContext ctx, Message msg) throws Exception {
         switch (msg.getType()) {
             case ProtocolConstants.TYPE_HEARTBEAT:
-                System.out.println("Heartbeat from " + ctx.channel().remoteAddress());
                 ctx.writeAndFlush(Message.heartbeat());
                 break;
 
@@ -44,7 +47,7 @@ public class ServerHandler extends SimpleChannelInboundHandler<Message> {
              * 取消超时定时器
              * 从 pendingJobs 和 runningTasks 中移除任务
              * 更新数据库状态（成功/失败）
-              */
+             */
             case ProtocolConstants.TYPE_RESPONSE:
                 String resultJson = new String(msg.getBody());
                 ExecutionResult result = JsonUtil.fromJson(resultJson, ExecutionResult.class);
@@ -55,7 +58,7 @@ public class ServerHandler extends SimpleChannelInboundHandler<Message> {
                             result.getSuccess(),
                             result.getSuccess() ? null : result.getMessage()
                     );
-                    System.out.println("Job " + result.getJobId() + " completed, success=" + result.getSuccess());
+                    log.info("Job {} completed, success={}", result.getJobId(), result.getSuccess());
                 }
                 break;
 
@@ -65,17 +68,20 @@ public class ServerHandler extends SimpleChannelInboundHandler<Message> {
                 WorkerInfo workerInfo = JsonUtil.fromJson(json, WorkerInfo.class);
                 this.workerId = workerInfo.getWorkerId();
                 SchedulerServer.registerWorker(workerId, ctx);
+                // 回注册确认，worker 拿到 ACK 才认为注册成功
+                ctx.writeAndFlush(Message.registerAck());
                 break;
 
             default:
-                System.out.println("Unknown message type: " + msg.getType());
+                log.warn("Unknown message type: {}", msg.getType());
         }
     }
+
     //空闲超时（60秒无消息）
     @Override
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
         if (evt instanceof IdleStateEvent) {
-            System.out.println("Heartbeat timeout, closing: " + ctx.channel().remoteAddress());
+            log.warn("Heartbeat timeout, closing: {}", ctx.channel().remoteAddress());
             if (workerId != null) {
                 SchedulerServer.removeWorker(workerId);// 移除节点
             }
@@ -84,11 +90,10 @@ public class ServerHandler extends SimpleChannelInboundHandler<Message> {
         }
     }
 
-
     //发生异常时
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-        cause.printStackTrace();
+        log.error("Exception on channel {}: {}", ctx.channel().remoteAddress(), cause.toString());
         if (workerId != null) {
             SchedulerServer.removeWorker(workerId);
         }

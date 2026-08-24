@@ -1,8 +1,11 @@
 package com.yg.scheduler.core;
 
 import com.yg.scheduler.common.JobContext;
+import com.yg.scheduler.common.config.AppConfig;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.sql.*;
 import java.util.ArrayList;
@@ -17,14 +20,19 @@ import java.util.List;
  * 幂等保障	利用 task_id 的唯一索引，防止重复任务插入
  */
 public class JobDao {
+    private static final Logger log = LoggerFactory.getLogger(JobDao.class);
     private static volatile JobDao instance;
     private final HikariDataSource dataSource;
 
     JobDao() {
         HikariConfig config = new HikariConfig();
-        config.setJdbcUrl("jdbc:mysql://localhost:3306/scheduler?useSSL=false&serverTimezone=UTC");
-        config.setUsername("root");
-        config.setPassword("123456");
+        config.setJdbcUrl(AppConfig.get("db.jdbc-url", "jdbc:mysql://localhost:3306/scheduler?useSSL=false&serverTimezone=UTC"));
+        config.setUsername(AppConfig.get("db.username", "root"));
+        config.setPassword(AppConfig.get("db.password", "123456"));
+        config.setMaximumPoolSize(10);
+        config.setConnectionTimeout(5000);
+        // 数据库未就绪时不崩 JVM（容器启动时 MySQL 可能还没起来），等首次访问时再重试
+        config.setInitializationFailTimeout(-1);
         dataSource = new HikariDataSource(config);
     }
 
@@ -57,9 +65,9 @@ public class JobDao {
         } catch (SQLException e) {
             // 唯一索引冲突：任务已存在
             if (e.getErrorCode() == 1062) {
-                System.out.println("Task already exists: " + job.getTaskId());
+                log.info("Task already exists: {}", job.getTaskId());
             } else {
-                e.printStackTrace();
+                log.error("Failed to save job {}", job.getTaskId(), e);
             }
         }
     }
@@ -73,7 +81,7 @@ public class JobDao {
             ps.setLong(3, jobId);
             ps.executeUpdate();
         } catch (SQLException e) {
-            e.printStackTrace();
+            log.error("Failed to update status jobId={} status={}", jobId, status, e);
         }
     }
 
@@ -84,7 +92,7 @@ public class JobDao {
             ps.setLong(1, jobId);
             ps.executeUpdate();
         } catch (SQLException e) {
-            e.printStackTrace();
+            log.error("Failed to increment retry count jobId={}", jobId, e);
         }
     }
 
@@ -107,7 +115,7 @@ public class JobDao {
                         .build();
             }
         } catch (SQLException e) {
-            e.printStackTrace();
+            log.error("Failed to find pending job by taskId={}", taskId, e);
         }
         return null;
     }
@@ -132,7 +140,7 @@ public class JobDao {
                 jobs.add(job);
             }
         } catch (SQLException e) {
-            e.printStackTrace();
+            log.error("Failed to find pending jobs", e);
         }
         return jobs;
     }

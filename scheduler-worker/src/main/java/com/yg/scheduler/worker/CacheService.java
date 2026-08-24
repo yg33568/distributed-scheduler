@@ -4,6 +4,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.google.common.hash.BloomFilter;
 import com.google.common.hash.Funnels;
 import com.google.common.util.concurrent.Striped;
+import com.yg.scheduler.common.config.AppConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import redis.clients.jedis.Jedis;
@@ -64,10 +65,13 @@ public class CacheService {
         // 初始化本地缓存
         this.localCache = CacheConfig.createLocalCache();
 
-        // 初始化Redis连接池
+        // 初始化Redis连接池（地址从配置读取，Docker 场景由环境变量覆盖）
+        String redisHost = AppConfig.get("redis.host", "localhost");
+        int redisPort = AppConfig.getInt("redis.port", 6379);
         JedisPoolConfig poolConfig = new JedisPoolConfig();
         poolConfig.setMaxTotal(10);
-        this.jedisPool = new JedisPool(poolConfig, "localhost", 6379);
+        this.jedisPool = new JedisPool(poolConfig, redisHost, redisPort);
+        log.info("[Cache] Redis: {}:{}", redisHost, redisPort);
 
         // 初始化布隆过滤器（预计10万条数据，误判率1%）
         this.bloomFilter = BloomFilter.create(

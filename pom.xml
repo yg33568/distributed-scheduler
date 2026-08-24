@@ -17,9 +17,11 @@
     </modules>
 
     <properties>
-        <maven.compiler.source>11</maven.compiler.source>
-        <maven.compiler.target>11</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <maven.compiler.release>11</maven.compiler.release>
         <netty.version>4.1.100.Final</netty.version>
+        <curator.version>5.9.0</curator.version>
     </properties>
 
     <dependencyManagement>
@@ -33,6 +35,17 @@
                 <groupId>io.netty</groupId>
                 <artifactId>netty-codec</artifactId>
                 <version>${netty.version}</version>
+            </dependency>
+            <!-- 统一 slf4j 2.x（curator/zookeeper/testng 会传递不同版本，强制收敛到一个版本） -->
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-api</artifactId>
+                <version>2.0.16</version>
+            </dependency>
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-simple</artifactId>
+                <version>2.0.16</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
@@ -49,7 +62,6 @@
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>
-            <version>1.7.36</version>
         </dependency>
         <!-- 单元测试 -->
         <dependency>

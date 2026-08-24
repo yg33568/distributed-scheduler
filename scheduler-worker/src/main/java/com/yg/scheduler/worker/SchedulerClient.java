@@ -1,5 +1,6 @@
 package com.yg.scheduler.worker;
 
+import com.yg.scheduler.common.config.AppConfig;
 import com.yg.scheduler.common.protocol.Message;
 import com.yg.scheduler.common.protocol.MessageDecoder;
 import com.yg.scheduler.common.protocol.MessageEncoder;
@@ -13,17 +14,23 @@ import io.netty.channel.ChannelPipeline;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 //调度客户端/Worker入口
 public class SchedulerClient {
 
+    private static final Logger log = LoggerFactory.getLogger(SchedulerClient.class);
+
     private final String host;
     private final int port;
+    private final String workerId;
     private Channel channel;
 
-    public SchedulerClient(String host, int port) {
+    public SchedulerClient(String host, int port, String workerId) {
         this.host = host;
         this.port = port;
+        this.workerId = workerId;
     }
 
     //连接调度服务器
@@ -46,14 +53,14 @@ public class SchedulerClient {
 
             ChannelFuture future = bootstrap.connect(host, port).sync();
             this.channel = future.channel();
-            System.out.println("Connected to scheduler: " + host + ":" + port);
+            log.info("Connected to scheduler: {}:{}", host, port);
 
             // 发送注册消息
-            String workerId = "worker-" + System.currentTimeMillis();//基于时间戳生成唯一ID
-            WorkerInfo info = new WorkerInfo(workerId, host, port, true, System.currentTimeMillis());
+            String advertiseHost = AppConfig.get("worker.advertise-host", host);
+            WorkerInfo info = new WorkerInfo(workerId, advertiseHost, port, true, System.currentTimeMillis());
             String json = JsonUtil.toJson(info);
             channel.writeAndFlush(Message.register(json.getBytes()));
-            System.out.println("Registered with workerId: " + workerId);
+            log.info("Registered with workerId: {}", workerId);
 
             startHeartbeat();
 
@@ -70,7 +77,7 @@ public class SchedulerClient {
                 try {
                     Thread.sleep(30000);
                     channel.writeAndFlush(Message.heartbeat());
-                    System.out.println("Send heartbeat");
+                    log.debug("Send heartbeat");
                 } catch (InterruptedException e) {
                     break;
                 }
@@ -81,6 +88,12 @@ public class SchedulerClient {
     }
 
     public static void main(String[] args) throws Exception {
-        new SchedulerClient("127.0.0.1", 8080).connect();
+        String host = AppConfig.get("scheduler.host", "localhost");
+        int port = AppConfig.getInt("scheduler.port", 8080);
+        String workerId = AppConfig.get("worker.id", "");
+        if (workerId == null || workerId.isEmpty()) {
+            workerId = "worker-" + System.currentTimeMillis();
+        }
+        new SchedulerClient(host, port, workerId).connect();
     }
 }

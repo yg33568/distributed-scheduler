@@ -32,4 +32,7 @@ public class ProtocolConstants {
     /** 消息状态：缓存迁移*/
     public static final byte TYPE_CACHE_MIGRATE = 101;
 
+    /** 消息状态：注册确认（master -> worker）*/
+    public static final byte TYPE_REGISTER_ACK = 102;
+
 }
