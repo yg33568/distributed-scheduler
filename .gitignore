@@ -3,6 +3,10 @@ target/
 !**/src/main/**/target/
 !**/src/test/**/target/
 
+# maven-shade 生成的简化 pom
+dependency-reduced-pom.xml
+dependency-reduced-pom-*.xml
+
 ### IntelliJ IDEA ###
 .idea/modules.xml
 .idea/jarRepositories.xml
