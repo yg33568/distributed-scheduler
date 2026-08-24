@@ -8,4 +8,5 @@ public interface JobExecutor {
      * @return 执行结果
      */
     ExecutionResult execute(JobContext context);
+
 }

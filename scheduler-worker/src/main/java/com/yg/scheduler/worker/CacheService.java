@@ -13,9 +13,20 @@ import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
+/**
+ * 请求一个 Key →
+ *   ① 布隆过滤器（最快，12MB内存）→ 不存在直接返回
+ *   ② Caffeine本地缓存（次快，本机内存）→ 找到就返回
+ *   ③ 互斥锁（防击穿）→ 只让一个线程去查
+ *   ④ Redis（网络请求）→ 找到就返回
+ *   ⑤ 数据库（最慢）→ 最后的选择
+ */
 public class CacheService {
 
+    //Caffeine本地缓存（L1）
     private final Cache<String, String> localCache;
+
+    //Redis连接池
     private final JedisPool jedisPool;
 
     // 1. 布隆过滤器（防穿透）
@@ -67,6 +78,7 @@ public class CacheService {
         System.out.println("[Cache] L1 miss: " + key);
 
         // ========== 第三层：互斥锁（防击穿） ==========
+        //如果很多请求同时查同一个 Key，只有第一个请求去查 Redis/DB，其他请求等第一个查完再直接从缓存拿。
         ReentrantLock lock = keyLocks.computeIfAbsent(key, k -> new ReentrantLock());
         lock.lock();
         try {
@@ -80,6 +92,7 @@ public class CacheService {
             }
 
             // ========== 第四层：Redis分布式缓存 L2 ==========
+            // 如果 Redis 有数据，拿到后回填本地缓存，下次就直接从本地拿了
             try (Jedis jedis = jedisPool.getResource()) {
                 value = jedis.get(key);
                 if (value != null) {
@@ -98,6 +111,7 @@ public class CacheService {
             System.out.println("[Cache] L2 miss: " + key);
 
             // ========== 第五层：数据库（DataLoader） ==========
+            //查到数据后写入 Redis 和本地缓存，下次就不用再查数据库了
             if (dataLoader != null) {
                 value = dataLoader.load();
                 if (value != null) {
@@ -130,18 +144,21 @@ public class CacheService {
         }
     }
 
+    //缓存失效方法
     public void evict(String key) {
-        localCache.invalidate(key);
+        localCache.invalidate(key);// 清除本地缓存
         try (Jedis jedis = jedisPool.getResource()) {
-            jedis.del(key);
+            jedis.del(key); // 删除Redis中的Key
         }
         System.out.println("[Cache] Evicted: " + key);
     }
 
+    //获取本地缓存命中率
     public double getHitRate() {
         return localCache.stats().hitRate();
     }
 
+    //添加Key到布隆过滤器
     public void addToBloomFilter(String key) {
         bloomFilter.put(key);
     }

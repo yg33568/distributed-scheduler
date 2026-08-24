@@ -6,11 +6,13 @@ import lombok.NoArgsConstructor;
 import lombok.AllArgsConstructor;
 import java.io.Serializable;
 import java.util.List;
-
+// JobContext 是任务上下文对象，是调度中心发给执行器的“任务单”。
+// 它包含了执行一个任务需要的所有信息。
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
+//实现 Serializable 接口，支持序列化
 public class JobContext implements Serializable {
     private static final long serialVersionUID = 1L;
 
@@ -32,7 +34,7 @@ public class JobContext implements Serializable {
     /** 超时时间（秒） */
     private Integer timeout;
 
-    /** 唯一任务id */
+    /** 唯一任务id（幂等键） */
     private String taskId;
 
     /** 重试次数 */

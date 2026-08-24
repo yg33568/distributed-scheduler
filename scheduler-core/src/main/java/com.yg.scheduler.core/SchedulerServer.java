@@ -41,12 +41,20 @@ public class SchedulerServer {
         this.port = port;
     }
 
+    //执行器注册
     public static void registerWorker(String workerId, ChannelHandlerContext ctx) {
         workers.put(workerId, ctx);
         rebuildRouter();
         System.out.println("Worker registered: " + workerId + ", total workers: " + workers.size());
     }
 
+    /**
+     * 执行器下线
+     * 当执行器断开或心跳超时，做三件事：
+     * ① 任务转移	把未完成的任务放入 retryQueue	任务不能丢
+     * ② 缓存迁移	把热点Key发给其他执行器	新节点的缓存不能是冷的
+     * ③ 移除节点	从 workers 移除，重建Hash环	后续任务不再发给它
+     */
     public static void removeWorker(String workerId) {
         // 任务转移：将该 worker 未完成的任务放回重试队列
         List<JobContext> orphanTasks = runningTasks.remove(workerId);
@@ -110,6 +118,19 @@ public class SchedulerServer {
         return workers;
     }
 
+
+    //分片调度器
+    //每 30 秒执行一次，生成 10 个分片任务，通过一致性Hash发给对应的执行器
+
+    /**
+     * 对每个分片：
+     *     1. 用一致性哈希算出"该发给谁" → router.route("shard-0")
+     *     2. 如果执行器在线 → 构建任务（JobContext）
+     *     3. 记录热点Key（用于缓存迁移）
+     *     4. 存数据库
+     *     5. 发送给执行器
+     *     6. 记录内存状态，设置30秒超时定时器
+     */
     private void startShardingScheduler() {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         scheduler.scheduleAtFixedRate(() -> {
@@ -192,6 +213,7 @@ public class SchedulerServer {
         }, 5, 30, TimeUnit.SECONDS);
     }
 
+    //每 10 秒处理一个失败/超时的任务，重新发给其他执行器
     private void startRetryScheduler() {
         ScheduledExecutorService retryScheduler = Executors.newSingleThreadScheduledExecutor();
         retryScheduler.scheduleAtFixedRate(() -> {
@@ -246,6 +268,7 @@ public class SchedulerServer {
 
             // 启动分片调度器
             startShardingScheduler();
+            //启动重试调度器
             startRetryScheduler();
 
             ChannelFuture future = bootstrap.bind(port).sync();
@@ -256,7 +279,8 @@ public class SchedulerServer {
         }
     }
 
-    public void onJobCompleted(Long jobId, boolean success, String message) {
+    //执行器返回结果后调用，负责清理资源。
+    public static void onJobCompleted(Long jobId, boolean success, String message) {
         ScheduledFuture<?> timeoutFuture = timeoutFutures.remove(jobId);
         if (timeoutFuture != null) {
             timeoutFuture.cancel(false);

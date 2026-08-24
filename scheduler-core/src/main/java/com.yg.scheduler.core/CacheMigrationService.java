@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+//缓存迁移服务
 public class CacheMigrationService {
 
     // 记录每个执行器负责的热点key

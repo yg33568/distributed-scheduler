@@ -8,6 +8,14 @@ import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * 是任务持久化的数据访问层，负责把任务信息存入 MySQL
+ *
+ * 保存任务	调度中心下发任务前，把任务信息写入数据库，状态为 PENDING
+ * 更新状态	任务执行完成后，更新状态为 SUCCESS、FAILED 或 TIMEOUT
+ * 查询任务	调度中心重启时，从数据库恢复未完成的任务
+ * 幂等保障	利用 task_id 的唯一索引，防止重复任务插入
+ */
 public class JobDao {
     private static volatile JobDao instance;
     private final HikariDataSource dataSource;

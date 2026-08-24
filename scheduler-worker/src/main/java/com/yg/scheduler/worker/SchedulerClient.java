@@ -14,6 +14,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 
+//调度客户端/Worker入口
 public class SchedulerClient {
 
     private final String host;
@@ -25,6 +26,7 @@ public class SchedulerClient {
         this.port = port;
     }
 
+    //连接调度服务器
     public void connect() throws Exception {
         NioEventLoopGroup group = new NioEventLoopGroup();
 
@@ -46,8 +48,8 @@ public class SchedulerClient {
             this.channel = future.channel();
             System.out.println("Connected to scheduler: " + host + ":" + port);
 
-            // Send registration message
-            String workerId = "worker-" + System.currentTimeMillis();
+            // 发送注册消息
+            String workerId = "worker-" + System.currentTimeMillis();//基于时间戳生成唯一ID
             WorkerInfo info = new WorkerInfo(workerId, host, port, true, System.currentTimeMillis());
             String json = JsonUtil.toJson(info);
             channel.writeAndFlush(Message.register(json.getBytes()));
@@ -61,6 +63,7 @@ public class SchedulerClient {
         }
     }
 
+    //启动心跳线程
     private void startHeartbeat() {
         Thread heartbeatThread = new Thread(() -> {
             while (channel != null && channel.isActive()) {
@@ -73,7 +76,7 @@ public class SchedulerClient {
                 }
             }
         });
-        heartbeatThread.setDaemon(true);
+        heartbeatThread.setDaemon(true);// 设置为守护线程，JVM退出时自动终止
         heartbeatThread.start();
     }
 

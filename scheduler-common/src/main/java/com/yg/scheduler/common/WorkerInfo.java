@@ -4,6 +4,8 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+// WorkerInfo 是执行器注册信息对象
+// 是执行器启动时向调度中心注册的“身份证”
 @Data
 @NoArgsConstructor
 @AllArgsConstructor

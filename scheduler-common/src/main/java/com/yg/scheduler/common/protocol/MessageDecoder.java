@@ -14,6 +14,13 @@ import java.util.List;
  */
 public class MessageDecoder extends ByteToMessageDecoder {
 
+    /**
+     * decode 方法，每当有数据到达时被调用
+     * @param ctx 当前通道上下文
+     * @param in 接收到的字节数据
+     * @param out 解码后的对象要放到这个列表里
+     * @throws Exception
+     */
     @Override
     protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
         // 检查可读字节数是否足够解析头部

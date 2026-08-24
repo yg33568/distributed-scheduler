@@ -9,23 +9,28 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.timeout.IdleStateEvent;
 
+// ServerHandler 是调度中心（Scheduler）的业务处理器
+// 负责处理所有来自执行器（Worker）的消息
 public class ServerHandler extends SimpleChannelInboundHandler<Message> {
 
     private String workerId;
 
+    //执行器连接时
     @Override
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
         System.out.println("Executor connected: " + ctx.channel().remoteAddress());
     }
 
+    //执行器断开时
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         System.out.println("Executor disconnected: " + ctx.channel().remoteAddress());
         if (workerId != null) {
-            SchedulerServer.removeWorker(workerId);
+            SchedulerServer.removeWorker(workerId);// 从注册表移除
         }
     }
 
+    //收到消息时的处理
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, Message msg) throws Exception {
         switch (msg.getType()) {
@@ -34,23 +39,27 @@ public class ServerHandler extends SimpleChannelInboundHandler<Message> {
                 ctx.writeAndFlush(Message.heartbeat());
                 break;
 
+            /**
+             * 执行器执行完任务后返回结果，调度中心调用 onJobCompleted 做三件事：
+             * 取消超时定时器
+             * 从 pendingJobs 和 runningTasks 中移除任务
+             * 更新数据库状态（成功/失败）
+              */
             case ProtocolConstants.TYPE_RESPONSE:
                 String resultJson = new String(msg.getBody());
                 ExecutionResult result = JsonUtil.fromJson(resultJson, ExecutionResult.class);
 
                 if (result.getJobId() != null) {
-                    if (result.getSuccess()) {
-                        JobDao.getInstance().updateStatus(result.getJobId(), "SUCCESS", null);
-                        System.out.println("Updated job " + result.getJobId() + " status to SUCCESS");
-                    } else {
-                        JobDao.getInstance().updateStatus(result.getJobId(), "FAILED", result.getMessage());
-                        System.out.println("Updated job " + result.getJobId() + " status to FAILED");
-                    }
-                    // 通知调度中心完成任务
-                    // 需要获取 SchedulerServer 实例来调用 onJobCompleted
+                    SchedulerServer.onJobCompleted(
+                            result.getJobId(),
+                            result.getSuccess(),
+                            result.getSuccess() ? null : result.getMessage()
+                    );
+                    System.out.println("Job " + result.getJobId() + " completed, success=" + result.getSuccess());
                 }
                 break;
 
+            //执行器启动时发送注册消息，调度中心把它加入 workers 列表，重建一致性Hash环。
             case ProtocolConstants.TYPE_REGISTER:
                 String json = new String(msg.getBody());
                 WorkerInfo workerInfo = JsonUtil.fromJson(json, WorkerInfo.class);
@@ -62,18 +71,21 @@ public class ServerHandler extends SimpleChannelInboundHandler<Message> {
                 System.out.println("Unknown message type: " + msg.getType());
         }
     }
-
+    //空闲超时（60秒无消息）
     @Override
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
         if (evt instanceof IdleStateEvent) {
             System.out.println("Heartbeat timeout, closing: " + ctx.channel().remoteAddress());
             if (workerId != null) {
-                SchedulerServer.removeWorker(workerId);
+                SchedulerServer.removeWorker(workerId);// 移除节点
             }
+
             ctx.close();
         }
     }
 
+
+    //发生异常时
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
         cause.printStackTrace();

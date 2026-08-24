@@ -26,5 +26,10 @@ public class ProtocolConstants {
     /** 消息状态：失败 */
     public static final byte STATUS_FAIL = 2;
 
+    /** 消息状态：注册*/
     public static final byte TYPE_REGISTER = 100;
+
+    /** 消息状态：缓存迁移*/
+    public static final byte TYPE_CACHE_MIGRATE = 101;
+
 }
