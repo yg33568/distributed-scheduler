@@ -60,6 +60,25 @@ public class MessageDecoderTest {
     }
 
     @Test
+    public void testRegisterAckDecode() {
+        EmbeddedChannel channel = new EmbeddedChannel(new MessageDecoder());
+        byte[] body = new byte[0];
+        ByteBuf buf = Unpooled.buffer();
+        buf.writeInt(ProtocolConstants.MAGIC_NUMBER);
+        buf.writeByte(ProtocolConstants.VERSION);
+        buf.writeByte(ProtocolConstants.TYPE_REGISTER_ACK);
+        buf.writeByte(ProtocolConstants.STATUS_SUCCESS);
+        buf.writeInt(body.length);
+        buf.writeBytes(body);
+        channel.writeInbound(buf);
+
+        Message result = channel.readInbound();
+        assertNotNull(result);
+        assertEquals(ProtocolConstants.TYPE_REGISTER_ACK, result.getType());
+        assertEquals(0, result.getLength());
+    }
+
+    @Test
     public void testHalfPackage() {
         EmbeddedChannel channel = new EmbeddedChannel(new MessageDecoder());
         byte[] body = "hello".getBytes();
