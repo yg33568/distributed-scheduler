@@ -1,0 +1,135 @@
+# =====================================================================
+# 分布式任务调度系统 - 一键部署
+# 拓扑：ZooKeeper + MySQL + Redis + 2×master(主备) + 2×worker
+# 使用：docker compose up -d --build
+# 演示：curl localhost:18081/status   (scheduler-a, 主)
+#       curl localhost:18082/status   (scheduler-b, 备)
+# 故障切换：docker compose stop scheduler-a  → 观察 scheduler-b 接管
+# =====================================================================
+version: "3.8"
+
+networks:
+  scheduler-net:
+    driver: bridge
+
+volumes:
+  mysql-data:
+
+services:
+  # ---------- 基础设施 ----------
+  zookeeper:
+    image: zookeeper:3.9
+    container_name: scheduler-zookeeper
+    environment:
+      ZOO_4LW_COMMANDS_WHITELIST: "ruok,stat"
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [scheduler-net]
+
+  mysql:
+    image: mysql:8.0
+    container_name: scheduler-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: "123456"
+      MYSQL_DATABASE: scheduler
+    command: --default-authentication-plugin=mysql_native_password
+    volumes:
+      - ./docker/initdb:/docker-entrypoint-initdb.d
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p123456"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [scheduler-net]
+
+  redis:
+    image: redis:7-alpine
+    container_name: scheduler-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [scheduler-net]
+
+  # ---------- 调度中心：主备两台 ----------
+  scheduler-a:
+    build:
+      context: .
+      dockerfile: scheduler-core/Dockerfile
+    container_name: scheduler-a
+    environment:
+      DB_JDBC_URL: "jdbc:mysql://mysql:3306/scheduler?useSSL=false&serverTimezone=UTC"
+      DB_USERNAME: root
+      DB_PASSWORD: "123456"
+      ZK_CONNECT: "zookeeper:2181"
+      SCHEDULER_PORT: "8080"
+      SCHEDULER_ADMIN_PORT: "8081"
+      SCHEDULER_ADVERTISE_HOST: "scheduler-a"
+    ports:
+      - "18081:8081"   # admin 端口映射到宿主机，供演示查询
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+    networks: [scheduler-net]
+
+  scheduler-b:
+    build:
+      context: .
+      dockerfile: scheduler-core/Dockerfile
+    container_name: scheduler-b
+    environment:
+      DB_JDBC_URL: "jdbc:mysql://mysql:3306/scheduler?useSSL=false&serverTimezone=UTC"
+      DB_USERNAME: root
+      DB_PASSWORD: "123456"
+      ZK_CONNECT: "zookeeper:2181"
+      SCHEDULER_PORT: "8080"
+      SCHEDULER_ADMIN_PORT: "8081"
+      SCHEDULER_ADVERTISE_HOST: "scheduler-b"
+    ports:
+      - "18082:8081"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+    networks: [scheduler-net]
+
+  # ---------- 执行器：两台 ----------
+  worker-a:
+    build:
+      context: .
+      dockerfile: scheduler-worker/Dockerfile
+    container_name: worker-a
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      ZK_CONNECT: "zookeeper:2181"
+      WORKER_ID: "worker-a"
+      WORKER_ADVERTISE_HOST: "worker-a"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    networks: [scheduler-net]
+
+  worker-b:
+    build:
+      context: .
+      dockerfile: scheduler-worker/Dockerfile
+    container_name: worker-b
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      ZK_CONNECT: "zookeeper:2181"
+      WORKER_ID: "worker-b"
+      WORKER_ADVERTISE_HOST: "worker-b"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    networks: [scheduler-net]

@@ -1,0 +1,7 @@
+# 构建上下文排除项
+**/target/
+.git
+.idea
+*.iml
+claude/
+*.log
