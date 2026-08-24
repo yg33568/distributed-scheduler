@@ -2,6 +2,8 @@ package com.yg.scheduler.worker;
 
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Worker 进程内共享的运行时状态。
@@ -17,6 +19,9 @@ public class WorkerRuntime {
     private final Set<String> executedTasks = ConcurrentHashMap.newKeySet();
     private final Set<String> executingTasks = ConcurrentHashMap.newKeySet();
     private final CacheService cacheService;
+
+    // 注册 ACK 等待：master 确认加入哈希环后才算注册成功（每次连接重置）
+    private volatile CountDownLatch registerAckLatch = new CountDownLatch(1);
 
     public WorkerRuntime(String workerId) {
         this.workerId = workerId;
@@ -37,6 +42,23 @@ public class WorkerRuntime {
 
     public CacheService getCacheService() {
         return cacheService;
+    }
+
+    /** master 回注册 ACK，标记本次连接注册成功 */
+    public void onRegisterAck() {
+        CountDownLatch l = registerAckLatch;
+        if (l.getCount() > 0) {
+            l.countDown();
+        }
+    }
+
+    /** 每次新连接前重置 ACK 等待 */
+    public void resetRegisterAck() {
+        registerAckLatch = new CountDownLatch(1);
+    }
+
+    public boolean awaitRegisterAck(long timeout, TimeUnit unit) throws InterruptedException {
+        return registerAckLatch.await(timeout, unit);
     }
 
     public void close() {

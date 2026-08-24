@@ -44,6 +44,7 @@ public class ClientHandler extends SimpleChannelInboundHandler<Message> {
             //注册确认：master 确认 worker 已加入哈希环
             case ProtocolConstants.TYPE_REGISTER_ACK:
                 log.info("Register ACK received, worker is now on the hash ring");
+                runtime.onRegisterAck();
                 break;
 
             //任务请求
