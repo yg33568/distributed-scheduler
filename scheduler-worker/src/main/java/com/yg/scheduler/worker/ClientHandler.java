@@ -9,6 +9,8 @@ import com.yg.scheduler.common.ExecutionResult;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -74,6 +76,9 @@ public class ClientHandler extends SimpleChannelInboundHandler<Message> {
                 CacheMigrationMessage migrateMsg = JsonUtil.fromJson(migrateJson, CacheMigrationMessage.class);
                 System.out.println("[Migration] Received cache migration request, keys count: " + migrateMsg.getHotKeys().size());
 
+                // 这些 key 在原 worker 上是热点，确实存在 → 先预热布隆过滤器，避免被门禁拦掉
+                cacheService.prewarm(migrateMsg.getHotKeys());
+
                 // 逐个预加载到本地缓存
                 for (String key : migrateMsg.getHotKeys()) {
                     cacheService.get(key, () -> {
@@ -92,38 +97,32 @@ public class ClientHandler extends SimpleChannelInboundHandler<Message> {
     private final CacheService cacheService = new CacheService();
 
     //execute — 真正执行任务的地方
+    // 数据模型：分片 i 负责处理 user:{i*100} .. user:{i*100+9} 这 10 个 key，
+    // 与调度中心生成 preloadKeys / hotKeys 的规则一致，保证缓存预热真正生效。
     private ExecutionResult execute(JobContext job) {
-        // 分片感知预热：提前加载数据到本地缓存
-        if (job.getPreloadKeys() != null && !job.getPreloadKeys().isEmpty()) {
-            for (String key : job.getPreloadKeys()) {
-                // 使用 cacheService.get 会自动加载到L1
-                cacheService.get(key, () -> {
-                    System.out.println("[Preload] Loading from DB: " + key);
-                    return "{\"data\":\"preloaded\"}";
-                });
-            }
-            System.out.println("[Preload] Preloaded " + job.getPreloadKeys().size() + " keys");
+        int base = job.getShardingItem() * 100;
+        List<String> keys = new ArrayList<>();
+        for (int j = 0; j < 10; j++) {
+            keys.add("user:" + (base + j));
         }
 
-        System.out.println("[DEBUG] execute() called, params=" + job.getParams());
+        System.out.println("[DEBUG] execute() called, shard=" + job.getShardingItem() + ", keys=" + keys);
+
         try {
-            // 假设任务需要读取用户数据
-            String userId = job.getParams();
+            // ① 预热布隆过滤器：这些 key 是数据集中确实存在的（与调度中心的 preloadKeys 一致）
+            cacheService.prewarm(keys);
 
-//            // 故意加一个前缀，让布隆过滤器判断为不存在
-//            String userData = cacheService.get("NOT_EXIST_" + userId, () -> {
-//                System.out.println("[DB] Querying database for user: " + userId);
-//                return null;  // 返回null，模拟数据不存在
-//            });
-//
-//            System.out.println("User data from cache: " + userData);
-            // 使用多级缓存读取数据
-            String userData = cacheService.get("user:" + userId, () -> {
-                // 模拟从数据库读取
-                System.out.println("[DB] Querying database for user: " + userId);
-                return "{\"name\":\"User" + userId + "\",\"level\":1}";
-            });
+            // ② 分片感知预热：逐个读取，加载到 L1/L2 缓存
+            for (String key : keys) {
+                cacheService.get(key, () -> {
+                    System.out.println("[DB] Querying database for: " + key);
+                    String uid = key.substring("user:".length());
+                    return "{\"name\":\"User" + uid + "\",\"level\":1}";
+                });
+            }
 
+            // ③ 业务读取（命中预热的 L1 缓存）
+            String userData = cacheService.get("user:" + (base + 3), () -> "{\"name\":\"unknown\"}");
             System.out.println("Executing job: " + job.getJobName() + ", shard: " + job.getShardingItem());
             System.out.println("User data from cache: " + userData);
 
